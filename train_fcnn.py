@@ -3,16 +3,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 from data_pipeline import load_data
 from models import FullyConnectedNN
-from loss_functions import denoise_loss_mse, denoise_loss_rmse, denoise_loss_rrmset
+from loss_functions import denoise_loss_mse, denoise_loss_rmse, denoise_loss_rrmset, calculate_final_metrics
 from tqdm import tqdm
 import time
 import os
 
 # Configuration for training
-NOISE_TYPE = 'EMG'       # Artifact type: 'EOG' for ocular or 'EMG' for muscle artifacts
+NOISE_TYPE = 'EOG'       # Artifact type: 'EOG' for ocular or 'EMG' for muscle artifacts
 EPOCHS = 50
-BATCH_SIZE = 32
+BATCH_SIZE = 32         # Reduced from 32
 LEARNING_RATE = .0005
+MAX_GRAD_NORM = 1.0    
 
 # Create results directory structure
 def create_results_dirs():
@@ -56,10 +57,16 @@ if __name__ == "__main__":
 
     # Convert training and validation data to tensors
     print("Converting data to tensors...")
-    train_noisy_tensor = torch.from_numpy(noiseEEG_train).to(device)
-    train_clean_tensor = torch.from_numpy(EEG_train).to(device)
-    val_noisy_tensor = torch.from_numpy(noiseEEG_val).to(device)
-    val_clean_tensor = torch.from_numpy(EEG_val).to(device)
+    train_noisy_tensor = torch.from_numpy(noiseEEG_train).float().to(device)
+    train_clean_tensor = torch.from_numpy(EEG_train).float().to(device)
+    val_noisy_tensor = torch.from_numpy(noiseEEG_val).float().to(device)
+    val_clean_tensor = torch.from_numpy(EEG_val).float().to(device)
+    
+    # Clear some memory
+    del noiseEEG_train, EEG_train, noiseEEG_val, EEG_val
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+    
     print(f"Training tensor shape: {train_noisy_tensor.shape}")
 
     # Training loop
@@ -85,9 +92,9 @@ if __name__ == "__main__":
                    leave=True)
         
         for i in pbar:
-            batch_noisy = train_noisy_tensor[i:i+BATCH_SIZE].float()
-            batch_clean = train_clean_tensor[i:i+BATCH_SIZE].float()
-            optimizer.zero_grad()
+            batch_noisy = train_noisy_tensor[i:i+BATCH_SIZE].float().contiguous()
+            batch_clean = train_clean_tensor[i:i+BATCH_SIZE].float().contiguous()
+            optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
             outputs = model(batch_noisy)
             
             # Compute MSE loss
@@ -96,12 +103,16 @@ if __name__ == "__main__":
             # Backward pass
             mse_loss.backward()
             
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+            
             # Calculate gradient norm before optimizer step
             total_norm = 0
             for p in model.parameters():
                 if p.grad is not None:
-                    total_norm += torch.sum(torch.square(p.grad.detach()))
-            batch_grad_norm = torch.sqrt(total_norm).item()
+                    param_norm = p.grad.detach().data.norm(2)
+                    total_norm += param_norm.item() ** 2
+            batch_grad_norm = np.sqrt(total_norm)
             total_grad_norm += batch_grad_norm / n_batches
             
             optimizer.step()
@@ -138,6 +149,16 @@ if __name__ == "__main__":
     with torch.no_grad():
         test_inputs = torch.from_numpy(noiseEEG_test).float().to(device)
         test_outputs = model(test_inputs).cpu().numpy()  # model output on test set (numpy array)
+
+    # Calculate final metrics
+    final_metrics = calculate_final_metrics(test_outputs, EEG_test, fs=256)  
+    
+    # Save metrics to file
+    metrics_file = f'results/FCNN/metrics_{NOISE_TYPE}_fcnn.txt'
+    with open(metrics_file, 'w') as f:
+        for metric_name, value in final_metrics.items():
+            f.write(f"{metric_name}: {value:.6f}\n")
+            print(f"Final {metric_name}: {value:.6f}")
 
     # Visualization: training curve and example denoising result
     if noiseEEG_test.shape[0] > 0:

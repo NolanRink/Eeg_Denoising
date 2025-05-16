@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from data_pipeline import load_data
 from models import SimpleCNN
-from loss_functions import denoise_loss_mse, denoise_loss_rmse, denoise_loss_rrmset
+from loss_functions import denoise_loss_mse, denoise_loss_rmse, denoise_loss_rrmset, calculate_final_metrics
 from tqdm import tqdm
 import time
 import os
@@ -138,6 +138,15 @@ if __name__ == "__main__":
     with torch.no_grad():
         test_in = torch.from_numpy(noiseEEG_test).unsqueeze(1).float().to(device)
         test_out = model(test_in).cpu().numpy()
+
+    # Calculate final metrics
+    final_metrics = calculate_final_metrics(test_out, EEG_test, fs=256) 
+    # Save metrics to file
+    metrics_file = f'results/CNN/metrics_{NOISE_TYPE}_cnn.txt'
+    with open(metrics_file, 'w') as f:
+        for metric_name, value in final_metrics.items():
+            f.write(f"{metric_name}: {value:.6f}\n")
+            print(f"Final {metric_name}: {value:.6f}")
 
     # Visualization
     if noiseEEG_test.shape[0] > 0:
